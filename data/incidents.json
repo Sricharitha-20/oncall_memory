@@ -1,0 +1,97 @@
+{
+  "team_notes": [
+    "Team convention: on any sev1 that starts within 30 minutes of a deploy, roll back FIRST and debug forward afterwards. Approved by the head of platform after INC-2041.",
+    "Team convention: never restart the payments-api pods during peak hours (18:00-22:00 IST) without paging the payments owner, because in-flight settlements get dropped.",
+    "Team convention: every post-mortem must record what did NOT work, so the next on-call does not repeat it."
+  ],
+  "incidents": [
+    {
+      "id": "INC-2041",
+      "date": "2026-01-14",
+      "severity": "sev1",
+      "service": "checkout-api",
+      "symptoms": "p99 latency 9s, 502s at the load balancer, DB connection count pinned at 100% of the pool, started 8 minutes after deploy v2.14.",
+      "root_cause": "Deploy v2.14 lowered the connection pool acquire timeout from 30s to 2s and added a new query path that held connections during an external call, exhausting the pool.",
+      "resolution": "Rolled back to v2.13 (recovered in 4 minutes). Later fix: release connections before the external call and restore the 30s acquire timeout.",
+      "failed_attempts": "Restarting pods (pool exhausted again within 3 minutes). Scaling checkout-api from 6 to 12 replicas (made it worse, more pools competing for DB connections).",
+      "ttr_minutes": 47
+    },
+    {
+      "id": "INC-2067",
+      "date": "2026-02-03",
+      "severity": "sev2",
+      "service": "search-service",
+      "symptoms": "Search results stale by several hours, indexer lag alert firing, Kafka consumer group lag growing on topic catalog-updates.",
+      "root_cause": "A single poison message with an oversized payload crashed the consumer in a loop, blocking the partition.",
+      "resolution": "Moved the poison message to the dead-letter topic, reset the consumer offset past it, and added a max payload size check.",
+      "failed_attempts": "Scaling the consumer group (partition was blocked, extra consumers sat idle). Full reindex (ran 3 hours, lag returned).",
+      "ttr_minutes": 95
+    },
+    {
+      "id": "INC-2102",
+      "date": "2026-02-27",
+      "severity": "sev1",
+      "service": "payments-api",
+      "symptoms": "Payment authorization failures at 22%, TLS handshake errors in logs for calls to the card-processor gateway.",
+      "root_cause": "The mTLS client certificate for the card-processor gateway expired. Renewal reminder had gone to a departed engineer's mailbox.",
+      "resolution": "Issued a new client cert from the internal CA, rotated the secret, and rolled the deployment. Reminder now routes to the platform on-call alias.",
+      "failed_attempts": "Restarting pods during peak hours (dropped in-flight settlements). Retrying the gateway with backoff (handshake failed every time).",
+      "ttr_minutes": 62
+    },
+    {
+      "id": "INC-2139",
+      "date": "2026-03-19",
+      "severity": "sev2",
+      "service": "session-store",
+      "symptoms": "Users randomly logged out, Redis evicted_keys rising, memory at 100% of maxmemory, login latency up 5x.",
+      "root_cause": "A new feature stored 40KB payloads in sessions without TTL. Redis hit maxmemory and the allkeys-lru policy evicted live sessions.",
+      "resolution": "Deleted the oversized session keys, set a 24h TTL on the feature's keys, and moved the payload to object storage.",
+      "failed_attempts": "Increasing maxmemory temporarily (bought 40 minutes, then filled again). Flushing the whole cache (logged out every user).",
+      "ttr_minutes": 73
+    },
+    {
+      "id": "INC-2188",
+      "date": "2026-04-22",
+      "severity": "sev2",
+      "service": "orders-api",
+      "symptoms": "Intermittent 5xx and 'could not resolve host' errors to the inventory service, only from some nodes, lasting 2-3 minutes at a time.",
+      "root_cause": "CoreDNS pods were OOM-killed under a burst of lookups; a misconfigured client library was disabling DNS caching and doing a lookup per request.",
+      "resolution": "Raised CoreDNS memory limits, enabled DNS caching (30s TTL) in the client library, and added a NodeLocal DNSCache.",
+      "failed_attempts": "Restarting the orders-api pods (no effect, the problem was DNS). Blaming the network team's firewall change (unrelated).",
+      "ttr_minutes": 118
+    },
+    {
+      "id": "INC-2214",
+      "date": "2026-05-30",
+      "severity": "sev1",
+      "service": "checkout-api",
+      "symptoms": "Error rate 11%, p99 latency 6s, DB connections at 95-100%, began 12 minutes after deploy v2.22.",
+      "root_cause": "Deploy v2.22 introduced an N+1 query in the cart summary endpoint; each request opened extra DB connections and saturated the pool.",
+      "resolution": "Followed the team convention: rolled back to v2.21 within 6 minutes, then fixed the N+1 with a batched query and shipped v2.23.",
+      "failed_attempts": "Increasing the pool size from 50 to 100 (hit the DB max_connections limit and affected other services).",
+      "ttr_minutes": 21
+    },
+    {
+      "id": "INC-2251",
+      "date": "2026-07-08",
+      "severity": "sev3",
+      "service": "notification-worker",
+      "symptoms": "Push notifications delayed by 20+ minutes, queue depth growing steadily, CPU low on workers.",
+      "root_cause": "The third-party push provider started rate limiting at 500 req/s; workers were retrying immediately without backoff and amplifying the throttling.",
+      "resolution": "Added exponential backoff with jitter and a token-bucket limiter at 400 req/s.",
+      "failed_attempts": "Adding more workers (increased throttling). Purging the queue (lost legitimate notifications).",
+      "ttr_minutes": 54
+    },
+    {
+      "id": "INC-2290",
+      "date": "2026-08-18",
+      "severity": "sev2",
+      "service": "reporting-db",
+      "symptoms": "Dashboards timing out, replica lag climbing to 15 minutes, disk IOPS saturated on the primary at 02:00 UTC.",
+      "root_cause": "A nightly analytics export job ran an unindexed full-table scan concurrently with the vacuum job.",
+      "resolution": "Killed the export job, added the missing index, and moved the export to run on the read replica outside the vacuum window.",
+      "failed_attempts": "Restarting the replica (lag came straight back). Increasing provisioned IOPS (expensive and did not fix the scan).",
+      "ttr_minutes": 68
+    }
+  ]
+}
